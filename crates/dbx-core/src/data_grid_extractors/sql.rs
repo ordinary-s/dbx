@@ -340,15 +340,44 @@ pub(super) fn write_sql_select(
                 "SELECT extraction requires one resolved table target.",
             )
         })?;
-    if context.request.rows.len() != 1
+    if context.request.rows.is_empty()
         || matches!(context.request.selection_kind, super::DataGridSelectionKind::Columns)
-        || (context.request.selection_kind == super::DataGridSelectionKind::Cells
-            && context.selected_columns.len() != 1)
+        || (context.request.selection_kind == super::DataGridSelectionKind::Rows && context.request.rows.len() != 1)
     {
         return Err(DataGridExtractError::new(
             DataGridExtractErrorCode::InvalidSelectSelection,
-            "SELECT extraction supports exactly one selected cell or row.",
+            "SELECT extraction supports cell selections or exactly one selected row.",
         ));
+    }
+
+    let table = data_grid_qualified_table_name(
+        context.request.database_type,
+        table_meta.catalog.as_deref(),
+        table_meta.schema.as_deref(),
+        table_meta.database.as_deref(),
+        &table_meta.table_name,
+        context.request.identifier_quote.as_deref(),
+    );
+    if context.request.selection_kind == super::DataGridSelectionKind::Cells {
+        if context.selected_columns.is_empty() {
+            return Err(DataGridExtractError::new(
+                DataGridExtractErrorCode::InvalidColumnMapping,
+                "SELECT extraction has no source columns for its predicate.",
+            ));
+        }
+        if let Some(column) = context
+            .selected_columns
+            .iter()
+            .find(|column| column.source_name.as_deref().is_none_or(|name| name.trim().is_empty()))
+        {
+            return Err(DataGridExtractError::new(
+                DataGridExtractErrorCode::InvalidColumnMapping,
+                format!("Column '{}' has no resolved source-column mapping.", column.display_name),
+            ));
+        }
+        write_bytes(output, format!("SELECT * FROM {table} WHERE ").as_bytes())?;
+        write_where_clause(context, output)?;
+        return write_bytes(output, b";");
     }
 
     let row = &context.request.rows[0];
@@ -407,14 +436,6 @@ pub(super) fn write_sql_select(
             context.request.identifier_quote.as_deref(),
         ));
     }
-    let table = data_grid_qualified_table_name(
-        context.request.database_type,
-        table_meta.catalog.as_deref(),
-        table_meta.schema.as_deref(),
-        table_meta.database.as_deref(),
-        &table_meta.table_name,
-        context.request.identifier_quote.as_deref(),
-    );
     write_bytes(output, format!("SELECT * FROM {table} WHERE {};", predicates.join(" AND ")).as_bytes())
 }
 

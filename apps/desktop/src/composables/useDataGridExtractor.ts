@@ -80,7 +80,14 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   function hasContextPredicateTarget(extractor: DataGridCopyExtractorId): boolean {
-    return (extractor === "sql-select" || extractor === "where-clause") && (options.contextCell.value?.col ?? -1) >= 0;
+    if ((extractor !== "sql-select" && extractor !== "where-clause") || (options.contextCell.value?.col ?? -1) < 0) return false;
+    const matrix = options.selectedCellMatrix.value;
+    const hasMultiCellMatrix = !!matrix && (matrix.rowIndexes.length > 1 || matrix.columnIndexes.length > 1);
+    // onCellContext marks an outside right-click as synthetic after replacing the
+    // old selection with the clicked cell. A genuine multi-cell matrix is kept
+    // only when the context cell belongs to that selection, so preserve it.
+    // Row selections remain context-targeted to retain the #6390 behavior.
+    return options.contextSelectionIsSynthetic.value || options.hasRowSelection.value || !hasMultiCellMatrix;
   }
 
   function buildRequest(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): DataGridExtractRequest | null {
@@ -99,9 +106,8 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // A right-click sets contextCell.col to the clicked column (≥ 0); the test
     // harness and non-right-click paths leave it at -1.
     const hasRightClickContext = !!contextCell && options.contextSelectionIsSynthetic.value;
-    // SQL predicates generated from the context menu must describe the cell the
-    // user right-clicked, even when an existing row or range selection remains
-    // active underneath that menu.
+    // Context predicates override synthetic/single-cell and row-selection
+    // contexts, but a genuine multi-cell matrix keeps the full selection.
     const contextPredicateCell = hasContextPredicateTarget(extractor) ? contextCell : null;
     // When the user already has a single-cell selection and right-clicks the same
     // cell, contextSelectionIsSynthetic is false but we still have a valid context
@@ -269,15 +275,13 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
         // The context-menu target is validated by buildRequest below.
       } else if (options.hasRowSelection.value) {
         if (options.selectedRowIds.value.size !== 1) return false;
-      } else if (matrix) {
-        if (matrix.rowIndexes.length !== 1 || matrix.columnIndexes.length !== 1) return false;
-      } else if (!options.contextCell.value || !options.contextSelectionIsSynthetic.value) {
+      } else if (!matrix && (!options.contextCell.value || !options.contextSelectionIsSynthetic.value)) {
         return false;
       }
       const request = buildRequest(extractor, extractorOptions);
-      if (!request?.tableMeta?.tableName.trim() || request.rows.length !== 1) return false;
+      if (!request?.tableMeta?.tableName.trim() || request.rows.length === 0) return false;
       if (request.selectionKind === "columns") return false;
-      if (request.selectionKind === "cells" && request.selectedColumnIndexes.length !== 1) return false;
+      if (request.selectedColumnIndexes.length === 0) return false;
       return request.columns.length > 0 && request.columns.every((column) => !!(column.sourceName ?? column.displayName)?.trim());
     }
     if (extractor === "where-clause" && contextPredicateTarget) {

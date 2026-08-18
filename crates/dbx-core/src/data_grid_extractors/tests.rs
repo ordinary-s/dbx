@@ -335,11 +335,20 @@ fn sql_copy_honors_kingbase_mysql_compat_connection_identifier_quote() {
     let mut updates = request(DataGridExtractorId::SqlUpdates);
     updates.database_type = Some(DatabaseType::Kingbase);
     updates.identifier_quote = Some("`".to_string());
-    updates.table_meta = Some(table_meta);
+    updates.table_meta = Some(table_meta.clone());
     updates.columns = vec![column("id", 0), column("event_type", 1)];
     updates.rows = vec![vec![json!(1), json!("logout")]];
     let updates_result = extract_data_grid_selection(updates).expect("Kingbase SQL UPDATE extraction");
     assert_eq!(updates_result.text, "UPDATE `audit-schema`.`events` SET `event_type` = 'logout' WHERE `id` = 1;");
+
+    let mut select = request(DataGridExtractorId::SqlSelect);
+    select.database_type = Some(DatabaseType::Kingbase);
+    select.identifier_quote = Some("`".to_string());
+    select.table_meta = Some(table_meta);
+    select.columns = vec![column("id", 0), column("event_type", 1)];
+    select.rows = vec![vec![json!(1), json!("login")]];
+    let select_result = extract_data_grid_selection(select).expect("Kingbase SQL SELECT extraction");
+    assert_eq!(select_result.text, "SELECT * FROM `audit-schema`.`events` WHERE `id` = 1 AND `event_type` = 'login';");
 }
 
 #[test]
@@ -575,6 +584,58 @@ fn builds_select_for_one_explicit_cell() {
 }
 
 #[test]
+fn select_cells_joins_multiple_fields_in_one_row() {
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.database_type = Some(DatabaseType::Mysql);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: None,
+    });
+    request.rows = vec![vec![json!(1), json!("Tom")]];
+
+    let result = extract_data_grid_selection(request).expect("multi-cell SELECT extraction");
+
+    assert_eq!(result.text, "SELECT * FROM `users` WHERE `id` = 1 AND `name` = 'Tom';");
+}
+
+#[test]
+fn select_cells_joins_multiple_rows_with_or() {
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.database_type = Some(DatabaseType::Mysql);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: None,
+    });
+    request.rows = vec![vec![json!(1), json!("Tom")], vec![json!(2), json!("Jack")]];
+
+    let result = extract_data_grid_selection(request).expect("multi-row SELECT extraction");
+
+    assert_eq!(
+        result.text,
+        "SELECT * FROM `users` WHERE (`id` = 1 AND `name` = 'Tom') OR (`id` = 2 AND `name` = 'Jack');"
+    );
+}
+
+#[test]
+fn where_clause_joins_multiple_fields_and_rows() {
+    let mut request = request(DataGridExtractorId::WhereClause);
+    request.database_type = Some(DatabaseType::Mysql);
+    request.rows = vec![vec![json!(1), json!("Tom")], vec![json!(2), json!("Jack")]];
+
+    let result = extract_data_grid_selection(request).expect("multi-row WHERE extraction");
+
+    assert_eq!(result.text, "(`id` = 1 AND `name` = 'Tom') OR (`id` = 2 AND `name` = 'Jack')");
+}
+
+#[test]
 fn select_row_uses_complete_identity_including_hidden_columns() {
     let mut request = request(DataGridExtractorId::SqlSelect);
     request.table_meta = Some(DataGridTableMeta {
@@ -617,9 +678,9 @@ fn select_row_falls_back_to_all_columns_without_usable_identity() {
 }
 
 #[test]
-fn select_rejects_ambiguous_selection_and_missing_target() {
+fn select_rejects_column_selection_multi_row_row_selection_and_missing_target() {
     let error = extract_data_grid_selection(request(DataGridExtractorId::SqlSelect))
-        .expect_err("multiple cells without a table must fail");
+        .expect_err("a SELECT without a table must fail");
     assert_eq!(error.code, DataGridExtractErrorCode::MissingTableMetadata);
 
     let mut request = request(DataGridExtractorId::SqlSelect);
@@ -631,7 +692,12 @@ fn select_rejects_ambiguous_selection_and_missing_target() {
         primary_keys: Vec::new(),
         columns: None,
     });
-    let error = extract_data_grid_selection(request).expect_err("multiple cells must fail");
+    request.selection_kind = DataGridSelectionKind::Columns;
+    let error = extract_data_grid_selection(request.clone()).expect_err("column selection must fail");
+    assert_eq!(error.code, DataGridExtractErrorCode::InvalidSelectSelection);
+
+    request.selection_kind = DataGridSelectionKind::Rows;
+    let error = extract_data_grid_selection(request).expect_err("multiple selected rows must fail");
     assert_eq!(error.code, DataGridExtractErrorCode::InvalidSelectSelection);
 }
 
@@ -668,11 +734,22 @@ fn where_clause_applies_mysql_json_cast() {
             },
         ]),
     });
+    let mut select_request = request.clone();
+    select_request.extractor = DataGridExtractorId::SqlSelect;
     let result = extract_data_grid_selection(request).expect("WHERE extraction");
     assert!(
         result.text.contains("CAST(") && result.text.contains(" AS JSON)"),
         "expected MySQL JSON CAST predicate, got: {}",
         result.text
+    );
+
+    let select_result = extract_data_grid_selection(select_request).expect("SELECT extraction");
+    assert!(
+        select_result.text.starts_with("SELECT * FROM `t` WHERE ")
+            && select_result.text.contains("CAST(")
+            && select_result.text.contains(" AS JSON)"),
+        "expected MySQL JSON CAST predicate in SELECT, got: {}",
+        select_result.text
     );
 }
 

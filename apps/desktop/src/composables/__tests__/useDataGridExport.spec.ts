@@ -307,8 +307,14 @@ describe("useDataGridExport prepared row statements", () => {
     );
   });
 
-  it("uses only the right-clicked cell for a WHERE clause", async () => {
-    const state = createExportState(editableTable, ["id", "name"], undefined, [7, "Ada"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, true, 1, 1);
+  it("uses only the right-clicked cell for a WHERE clause without a genuine multi-cell selection", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [1],
+      columns: ["name"],
+      rows: [["Ada"]],
+    };
+    const state = createExportState(editableTable, ["id", "name"], matrix, [7, "Ada"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, true, 1, 1);
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "name = 'Ada'", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
 
     expect(state.canCopyWithExtractor("where-clause")).toBe(true);
@@ -320,6 +326,116 @@ describe("useDataGridExport prepared row statements", () => {
         columns: [expect.objectContaining({ sourceName: "name" })],
         selectedColumnIndexes: [0],
         rows: [["Ada"]],
+        selectionKind: "cells",
+      }),
+    );
+  });
+
+  it("preserves a multi-column selection when right-clicking inside it", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: [[7, "Ada"]],
+    };
+    const state = createExportState(editableTable, ["id", "name"], matrix, [7, "Ada"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "id = 7 AND name = 'Ada'", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 2 });
+
+    expect(state.canCopyWithExtractor("where-clause")).toBe(true);
+    await state.copyWithExtractor("where-clause");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "where-clause",
+        columns: [expect.objectContaining({ sourceName: "id" }), expect.objectContaining({ sourceName: "name" })],
+        selectedColumnIndexes: [0, 1],
+        rows: [[7, "Ada"]],
+        selectionKind: "cells",
+      }),
+    );
+  });
+
+  it("preserves a 2x2 selection when right-clicking inside it", async () => {
+    const selectedRows = [
+      [7, "Ada"],
+      [8, "Grace"],
+    ];
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: selectedRows,
+    };
+    const state = createExportState(editableTable, ["id", "name"], matrix, undefined, undefined, selectedRows, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 2, 1);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "(id = 7 AND name = 'Ada') OR (id = 8 AND name = 'Grace')", mimeType: "application/sql", fileExtension: "sql", rowCount: 2, columnCount: 2 });
+
+    expect(state.canCopyWithExtractor("where-clause")).toBe(true);
+    await state.copyWithExtractor("where-clause");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "where-clause",
+        columns: [expect.objectContaining({ sourceName: "id" }), expect.objectContaining({ sourceName: "name" })],
+        selectedColumnIndexes: [0, 1],
+        rows: selectedRows,
+        selectionKind: "cells",
+      }),
+    );
+    expect(matrix.rowIndexes).toEqual([0, 1]);
+    expect(matrix.columnIndexes).toEqual([0, 1]);
+  });
+
+  it("uses the right-clicked cell when the context is outside a multi-cell selection", async () => {
+    const tableMeta: DataGridTableMeta = {
+      ...editableTable,
+      columns: [...(editableTable.columns ?? []), { name: "status", data_type: "int", is_nullable: false }],
+    };
+    const rows = [
+      [7, "Ada", 0],
+      [8, "Grace", 1],
+    ];
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: rows.map((row) => row.slice(0, 2)),
+    };
+    const state = createExportState(tableMeta, ["id", "name", "status"], matrix, undefined, undefined, rows, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, true, 2, 2);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "status = 1", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+
+    expect(state.canCopyWithExtractor("where-clause")).toBe(true);
+    await state.copyWithExtractor("where-clause");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "where-clause",
+        columns: [expect.objectContaining({ sourceName: "status" })],
+        selectedColumnIndexes: [0],
+        rows: [[1]],
+        selectionKind: "cells",
+      }),
+    );
+  });
+
+  it("builds a multi-cell SELECT request when right-clicking inside the selection", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: [[7, "Ada"]],
+    };
+    const state = createExportState(editableTable, ["id", "name"], matrix, [7, "Ada"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "SELECT * FROM users WHERE id = 7 AND name = 'Ada';", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 2 });
+
+    expect(state.canCopyWithExtractor("sql-select")).toBe(true);
+    await state.copyWithExtractor("sql-select");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-select",
+        columns: [expect.objectContaining({ sourceName: "id" }), expect.objectContaining({ sourceName: "name" })],
+        selectedColumnIndexes: [0, 1],
+        rows: [[7, "Ada"]],
         selectionKind: "cells",
       }),
     );
@@ -390,15 +506,14 @@ describe("useDataGridExport prepared row statements", () => {
     );
   });
 
-  it("disables SELECT copy for multiple cells or a missing table target", () => {
+  it("disables SELECT copy for a missing table target", () => {
     const matrix: CellSelectionMatrix = {
       rowIndexes: [0],
-      columnIndexes: [0, 1],
-      columns: ["id", "name"],
-      rows: [[7, "Ada"]],
+      columnIndexes: [1],
+      columns: ["name"],
+      rows: [["Ada"]],
     };
-    expect(createExportState(editableTable, ["id", "name"], matrix, [7, "Ada"]).canCopyWithExtractor("sql-select")).toBe(false);
-    expect(createExportState({ ...editableTable, tableName: "" }, ["id", "name"], { ...matrix, columnIndexes: [1], columns: ["name"], rows: [["Ada"]] }, [7, "Ada"]).canCopyWithExtractor("sql-select")).toBe(false);
+    expect(createExportState({ ...editableTable, tableName: "" }, ["id", "name"], matrix, [7, "Ada"]).canCopyWithExtractor("sql-select")).toBe(false);
   });
 
   // Regression tests for https://github.com/t8y2/dbx/issues/6272
