@@ -2729,6 +2729,65 @@ describe("queryStore hidden primary key editing", () => {
     );
   });
 
+  it.each([true, false])("keeps Oracle last-page and previous-page rows correct with autoCommit=%s (#13173)", async (autoCommit) => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "XE", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageLimit: options.pagination.limit,
+      pageOffset: options.pagination.offset,
+      useAgentResultSession: true,
+    }));
+    const rows = Array.from({ length: 2473 }, (_, index) => [index + 1]);
+    let position = 0;
+    const readPage = (maxRows: number, pageSize?: number, sessionId?: string) => {
+      if (!sessionId) position = 0;
+      const pageRows = rows.slice(position, Math.min(position + (pageSize ?? maxRows), maxRows));
+      position += pageRows.length;
+      const hasMore = !!pageSize && position < Math.min(rows.length, maxRows);
+      return [{ columns: ["ID"], rows: pageRows, affected_rows: 0, execution_time_ms: 1, has_more: hasMore, session_id: hasMore ? "oracle-cursor" : undefined }];
+    };
+    executeMulti.mockImplementation(async (_connection, _database, _sql, _schema, _execution, options) => readPage(options.maxRows, options.pageSize, options.resultSessionId));
+    executeInManualTransaction.mockImplementation(async (_txn, _sql, _database, _schema, maxRows, _preview, pageSize, sessionId) => readPage(maxRows, pageSize, sessionId));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "XE", "Query");
+    store.setAutoCommit(tabId, autoCommit);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const sql = "WITH a AS (SELECT id FROM events) SELECT a.* FROM a ORDER BY id";
+    const loadPage = (offset: number, sessionId?: string) =>
+      store.executeTabSql(tabId, sql, {
+        pagination: { limit: 200, offset, sessionId },
+        preserveResultDuringExecution: true,
+        preserveTotalRowCountDuringExecution: true,
+      });
+    await loadPage(0);
+    expect(tab.result?.rows).toEqual(rows.slice(0, 200));
+    await loadPage(200, tab.resultSessionId);
+    expect(tab.result?.rows).toEqual(rows.slice(200, 400));
+    tab.resultTotalRowCount = 2473;
+
+    await loadPage(2400);
+    expect(tab.result?.rows).toEqual(rows.slice(2400));
+    expect(tab.resultPageOffset).toBe(2400);
+    expect(tab.resultTotalRowCount).toBe(2473);
+    expect(tab.result?.has_more).toBe(false);
+
+    await loadPage(2200);
+    expect(tab.result?.rows).toEqual(rows.slice(2200, 2400));
+    expect(tab.resultPageOffset).toBe(2200);
+    expect(tab.result?.has_more).toBe(true);
+    await loadPage(2400, tab.resultSessionId);
+    expect(tab.result?.rows).toEqual(rows.slice(2400));
+    expect(tab.resultTotalRowCount).toBe(2473);
+    expect(tab.autoCommit).toBe(autoCommit);
+    if (!autoCommit) {
+      expect(executeMulti).not.toHaveBeenCalled();
+      expect(beginManualTransaction).toHaveBeenCalledTimes(1);
+      expect(executeInManualTransaction.mock.calls.every((call) => call[0] === "txn-1")).toBe(true);
+    }
+  });
+
   it("advances an OceanBase duplicate projection cursor through an offset jump and next page", async () => {
     getConnectionConfig.mockReturnValue({ id: "ob-1", name: "OceanBase", db_type: "oceanbase-oracle", database: "app", query_timeout_secs: 30 });
     analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
